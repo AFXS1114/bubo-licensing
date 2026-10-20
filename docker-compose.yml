@@ -1,0 +1,22 @@
+services:
+  backend:
+    build: ./backend
+    env_file:
+      - .env
+    environment:
+      NODE_ENV: ${NODE_ENV:-production}
+      PORT: 3000
+      ADMIN_ROLE: ${ADMIN_ROLE:-SUPER_ADMIN}
+      FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:8080}
+      TURSO_DATABASE_URL: ${TURSO_DATABASE_URL}
+      TURSO_AUTH_TOKEN: ${TURSO_AUTH_TOKEN}
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+  frontend:
+    build: .
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
+    restart: unless-stopped
