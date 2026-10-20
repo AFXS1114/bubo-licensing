@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { LayoutDashboard, Users, KeyRound, Package, Activity, LogOut, Plus, Search, ShieldCheck, RefreshCw, Ban, Copy, X } from 'lucide-react';
 import './styles.css';
 
-const API_BASE = (import.meta.env.VITE_LICENSE_API_URL || '').replace(/\/$/, '');
+const API_BASE = (import.meta.env.VITE_LICENSE_API_URL || 'https://bubo-licensing.onrender.com').replace(/\/$/, '');
 const api=async(path:string, options:RequestInit={})=>{try{const r=await fetch(`${API_BASE}${path}`,{...options,credentials:'include',headers:{'Content-Type':'application/json',...(options.headers||{})}}); const body=await r.json().catch(()=>({})); if(!r.ok) throw new Error(body.error||body.message||`Request failed (${r.status})`); return body} catch(error){ console.error(`API request failed: ${path}`,error); throw error; }};
 type License={id:string;reference:string;status:string;customer_name:string;plan_name:string;expires_at:string;active_devices:number;max_devices:number};
 export default function App(){const [admin,setAdmin]=useState<any>(null);const [page,setPage]=useState('Dashboard');const [licenses,setLicenses]=useState<License[]>([]);const [customers,setCustomers]=useState<any[]>([]);const [plans,setPlans]=useState<any[]>([]);const [dash,setDash]=useState<any>({counts:{}});const [q,setQ]=useState('');const [modal,setModal]=useState('');const [notice,setNotice]=useState('');
