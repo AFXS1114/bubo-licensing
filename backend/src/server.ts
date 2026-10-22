@@ -36,6 +36,52 @@ app.post('/api/licenses/:id/reset-device', async (request, reply) => { const adm
 app.get('/api/plans', async (request, reply) => { if(!(await auth(request,reply)))return; return (await query('SELECT * FROM license_plans ORDER BY name')).rows; });
 app.get('/api/audit', async (request, reply) => { if(!(await auth(request,reply)))return; return (await query('SELECT * FROM audit_logs ORDER BY created_at DESC LIMIT 100')).rows; });
 
+app.post('/api/licenses/activate', async (request, reply) => {
+  const body = z.object({
+    license: z.string().trim().min(1),
+    device: z.object({
+      name: z.string().max(120).optional(),
+      id: z.string().min(1).max(255),
+      appVersion: z.string().max(40).optional(),
+      platformVersion: z.string().max(40).optional(),
+    }),
+  }).parse(request.body);
+  const key = body.license.replace(/\s+/g, '').toUpperCase();
+  const license = (await query<any>('SELECT l.*, c.name AS customer_name FROM licenses l JOIN customers c ON c.id=l.customer_id WHERE l.license_key_hash=$1', [hashLicenseKey(key)])).rows[0];
+  if (!license) return reply.code(400).send({ error: 'INVALID_LICENSE' });
+  const expiresAt = new Date(license.expires_at);
+  if (license.status === 'REVOKED' || license.status === 'SUSPENDED') return reply.code(403).send({ error: license.status === 'REVOKED' ? 'LICENSE_REVOKED' : 'LICENSE_SUSPENDED' });
+  if (Number.isNaN(expiresAt.getTime()) || expiresAt <= new Date()) return reply.code(403).send({ error: 'LICENSE_EXPIRED' });
+  const deviceHash = hashSecret(body.device.id);
+  let device = (await query<any>("SELECT * FROM devices WHERE license_id=$1 AND device_identifier_hash=$2 AND status='ACTIVE'", [license.id, deviceHash])).rows[0];
+  if (!device) {
+    const count = await query<any>("SELECT count(*) AS count FROM devices WHERE license_id=$1 AND status='ACTIVE'", [license.id]);
+    if (Number(count.rows[0]?.count || 0) >= Number(license.max_devices)) return reply.code(409).send({ error: 'DEVICE_LIMIT_REACHED' });
+    device = (await query<any>('INSERT INTO devices(license_id,device_identifier_hash,device_label,app_version,platform_version) VALUES($1,$2,$3,$4,$5) RETURNING id', [license.id, deviceHash, body.device.name || 'Android device', body.device.appVersion, body.device.platformVersion])).rows[0];
+    await query("UPDATE licenses SET status='ACTIVE', activated_at=COALESCE(activated_at,datetime('now')) WHERE id=$1", [license.id]);
+  }
+  await query("INSERT INTO license_activations(license_id,device_id,event,app_version,platform_version) VALUES($1,$2,'ACTIVATED',$3,$4)", [license.id, device.id, body.device.appVersion, body.device.platformVersion]);
+  const validatedAt = new Date().toISOString();
+  return { customerName: license.customer_name, licenseKey: key, status: 'ACTIVE', expiresAt: expiresAt.toISOString(), deviceName: body.device.name || 'Android device', deviceId: device.id, validatedAt, graceUntil: new Date(expiresAt.getTime()).toISOString() };
+});
+
+function hashLicenseKey(key: string) { return hashSecret(key); }
+
+app.post('/api/licenses/validate', async (request, reply) => {
+  const body = z.object({ license: z.string().trim().min(1), device: z.object({ id: z.string().min(1).max(255) }) }).parse(request.body);
+  const key = body.license.replace(/\s+/g, '').toUpperCase();
+  const license = (await query<any>('SELECT l.*, c.name AS customer_name FROM licenses l JOIN customers c ON c.id=l.customer_id WHERE l.license_key_hash=$1', [hashLicenseKey(key)])).rows[0];
+  const expiresAt = license?.expires_at ? new Date(license.expires_at) : null;
+  const device = license ? (await query<any>("SELECT id FROM devices WHERE license_id=$1 AND device_identifier_hash=$2 AND status='ACTIVE'", [license.id, hashSecret(body.device.id)])).rows[0] : null;
+  if (!license) return reply.code(400).send({ error: 'INVALID_LICENSE' });
+  if (license.status === 'REVOKED') return reply.code(403).send({ error: 'LICENSE_REVOKED' });
+  if (license.status === 'SUSPENDED') return reply.code(403).send({ error: 'LICENSE_SUSPENDED' });
+  if (!expiresAt || expiresAt <= new Date()) return reply.code(403).send({ error: 'LICENSE_EXPIRED' });
+  if (!device) return reply.code(403).send({ error: 'DEVICE_REPLACEMENT_REQUIRED' });
+  await query("INSERT INTO license_validations(license_id,device_id,valid,status) VALUES($1,$2,1,'ACTIVE')", [license.id, device.id]);
+  return { customerName: license.customer_name, licenseKey: key, status: 'ACTIVE', expiresAt: expiresAt.toISOString(), validatedAt: new Date().toISOString() };
+});
+
 app.post('/api/v1/licenses/activate', async (request, reply) => { const b=z.object({ licenseKey:z.string(), deviceId:z.string().min(8), deviceLabel:z.string().max(120).optional(), appVersion:z.string().max(40).optional(), platformVersion:z.string().max(40).optional() }).parse(request.body); const r=await query<any>('SELECT * FROM licenses WHERE license_key_hash=$1',[hashSecret(b.licenseKey)]); const l=r.rows[0]; if(!l)return reply.code(404).send({valid:false,status:'NOT_FOUND'}); if(l.status==='REVOKED'||new Date(l.expires_at)<new Date())return reply.code(403).send({valid:false,status:new Date(l.expires_at)<new Date()?'EXPIRED':'REVOKED'}); const active=await query('SELECT * FROM devices WHERE license_id=$1 AND device_identifier_hash=$2 AND status=\'ACTIVE\'',[l.id,hashSecret(b.deviceId)]); let device=active.rows[0]; if(!device){const count=await query('SELECT count(*) count FROM devices WHERE license_id=$1 AND status=\'ACTIVE\'',[l.id]); if(count.rows[0].count>=l.max_devices)return reply.code(409).send({valid:false,status:'DEVICE_LIMIT_REACHED'}); device=(await query('INSERT INTO devices(license_id,device_identifier_hash,device_label,app_version,platform_version) VALUES($1,$2,$3,$4,$5) RETURNING id',[l.id,hashSecret(b.deviceId),b.deviceLabel,b.appVersion,b.platformVersion])).rows[0]; await query("UPDATE licenses SET status='ACTIVE',activated_at=COALESCE(activated_at,datetime('now')) WHERE id=$1",[l.id]); } return {valid:true,status:'ACTIVE',expiresAt:l.expires_at,deviceId:device.id,nextValidationRequiredAt:new Date(Date.now()+7*86400000)}; });
 app.post('/api/v1/licenses/validate', async (request, reply) => { const b=z.object({licenseKey:z.string(),deviceId:z.string()}).parse(request.body); const l=(await query<any>('SELECT * FROM licenses WHERE license_key_hash=$1',[hashSecret(b.licenseKey)])).rows[0]; const status=!l?'NOT_FOUND':l.status==='REVOKED'?'REVOKED':new Date(l.expires_at)<new Date()?'EXPIRED':'ACTIVE'; const d=l&&(await query('SELECT id FROM devices WHERE license_id=$1 AND device_identifier_hash=$2 AND status=\'ACTIVE\'',[l.id,hashSecret(b.deviceId)])).rows[0]; const valid=status==='ACTIVE'&&!!d; if(l)await query('INSERT INTO license_validations(license_id,device_id,valid,status) VALUES($1,$2,$3,$4)',[l.id,d?.id||null,valid,status]); return {valid,status,expiresAt:l?.expires_at??null}; });
 
